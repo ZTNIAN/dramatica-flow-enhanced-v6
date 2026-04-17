@@ -838,41 +838,49 @@ class WritingPipeline:
         if self.mirofish_reader and self.feedback_expert and ch % MIROFISH_INTERVAL == 0:
             log(f"MiroFish 读者测试（第 {ch} 章，每{self.config.mirofish_interval}章触发）...")
             try:
-                # 收集最近 N 章的内容
-                test_chapters = []
-                for prev_ch in range(max(1, ch - MIROFISH_INTERVAL + 1), ch + 1):
-                    c = self.sm.read_final(prev_ch) or self.sm.read_draft(prev_ch)
-                    if c:
-                        test_chapters.append({"number": prev_ch, "content": c[:self.config.mirofish_sample_chars]})
+                # 测试最新一章（MiroFishReader.simulate_readers 只接受单章）
+                test_content = self.sm.read_final(ch) or self.sm.read_draft(ch)
+                genre = self.writer.genre if hasattr(self.writer, 'genre') else "玄幻"
 
-                if test_chapters:
-                    # 模拟读者测试
-                    reader_report = self.mirofish_reader.simulate_reading(
-                        chapters=test_chapters,
-                        genre=self.writer.genre if hasattr(self.writer, 'genre') else "玄幻",
+                if test_content and test_content.strip():
+                    # 模拟读者测试（单章）
+                    reader_report = self.mirofish_reader.simulate_readers(
+                        chapter_content=test_content[:self.config.mirofish_sample_chars],
+                        chapter_number=ch,
+                        genre=genre,
                     )
                     log(f"  MiroFish 总分：{reader_report.overall_score}/100")
-                    log(f"  读者反馈：{len(reader_report.feedback_items)} 条")
 
-                    # 路由反馈到对应 Agent
-                    routed = self.feedback_expert.classify_and_route(reader_report)
-                    log(f"  反馈路由：{len(routed.routed_tasks)} 个任务")
+                    # 收集各层读者分数
+                    segment_scores = {}
+                    for seg in reader_report.segments:
+                        segment_scores[seg.segment_name] = seg.overall_score
+                        if seg.key_issues:
+                            log(f"  {seg.segment_name}（{seg.overall_score}分）：{'; '.join(seg.key_issues[:2])}")
+
+                    # 将 top_issues 拼成文本，交给 FeedbackExpert 分类路由
+                    feedback_text = "\n".join(
+                        reader_report.top_issues + reader_report.improvement_suggestions
+                    )
+                    feedback_result = self.feedback_expert.categorize_feedback(
+                        feedback_text=feedback_text,
+                        chapter_range=f"第{ch}章",
+                    )
+                    log(f"  反馈分类：{len(feedback_result.items)} 条")
 
                     # 保存 MiroFish 报告
                     mirofish_path = self.sm.book_dir / f"mirofish_report_ch{ch}.json"
                     mirofish_data = {
                         "chapter": ch,
                         "overall_score": reader_report.overall_score,
-                        "reader_scores": {
-                            "core": reader_report.core_reader_score,
-                            "normal": reader_report.normal_reader_score,
-                            "casual": reader_report.casual_reader_score,
-                        },
-                        "feedback_count": len(reader_report.feedback_items),
+                        "reader_scores": segment_scores,
+                        "top_issues": reader_report.top_issues,
+                        "improvement_suggestions": reader_report.improvement_suggestions,
+                        "feedback_count": len(reader_report.top_issues),
                         "routed_tasks": [
-                            {"target_agent": t.target_agent, "category": t.category,
-                             "priority": t.priority, "description": t.description}
-                            for t in routed.routed_tasks
+                            {"target_agent": fi.target_agent, "category": fi.category,
+                             "priority": fi.priority, "description": fi.description}
+                            for fi in feedback_result.items
                         ],
                     }
                     mirofish_path.write_text(
@@ -882,6 +890,8 @@ class WritingPipeline:
                     log(f"  报告已保存：{mirofish_path}")
             except Exception as e:
                 log(f"  MiroFish 测试失败（不阻塞）：{type(e).__name__}: {e}")
+                if not isinstance(e, (json.JSONDecodeError, KeyError, ValueError)):
+                    log(f"  详细错误：{traceback.format_exc()[-300:]}")
 
         return PipelineResult(
             chapter_number=ch,
@@ -979,27 +989,8 @@ class WritingPipeline:
             return ""
 
     # ── V6: Token 追踪 ────────────────────────────────────────────────────────
-
-    def _save_token_usage(self, chapter: int):
-        """V6: 保存本章的 LLM token 使用量"""
-        try:
-            import json as _json
-            from .agents import get_kb_queries  # 清除累积的查询
-            token_path = self.sm.book_dir / "token_usage.json"
-            existing = []
-            if token_path.exists():
-                existing = _json.loads(token_path.read_text(encoding="utf-8"))
-
-            # 从 LLM provider 获取 token 统计（如果有 tracker）
-            if hasattr(self, '_token_tracker') and self._token_tracker:
-                usage = self._token_tracker.get_chapter_usage(chapter)
-                existing.append(usage)
-                token_path.write_text(
-                    _json.dumps(existing, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
-        except Exception:
-            pass
+    # token 使用在 run() 方法中通过 get_tracker() 全局单例直接保存
+    # 此处保留接口供未来扩展
 
     # ── 多线程辅助方法 ────────────────────────────────────────────────────────
 
