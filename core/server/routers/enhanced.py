@@ -111,25 +111,50 @@ async def api_feedback(book_id: str, req: FeedbackReq):
 
 @router.post("/{book_id}/mirofish-test")
 async def api_mirofish_test(book_id: str, req: MiroFishReq):
-    """MiroFish 模拟读者测试"""
+    """MiroFish 模拟读者测试（V6 修复版）"""
     load_env()
     s = sm(book_id)
     from core.agents import MiroFishReader
     llm = create_llm()
     reader = MiroFishReader(llm)
 
-    # 收集指定范围的章节
-    chapters = []
-    end = req.end_chapter or 9999
+    # 收集指定范围的章节（逐章测试，MiroFishReader 只支持单章）
+    end = req.end_chapter or req.start_chapter
+    results = []
     for ch_num in range(req.start_chapter, end + 1):
         content = s.read_final(ch_num) or s.read_draft(ch_num)
         if content:
-            chapters.append({"number": ch_num, "content": content[:req.sample_count]})
-    if not chapters:
+            try:
+                result = await run_sync(
+                    reader.simulate_readers,
+                    content[:req.sample_count],
+                    ch_num,
+                    "玄幻",
+                )
+                results.append({
+                    "chapter": ch_num,
+                    "overall_score": result.overall_score,
+                    "top_issues": result.top_issues,
+                    "segments": [
+                        {"name": seg.segment_name, "score": seg.overall_score, "engagement": seg.engagement}
+                        for seg in result.segments
+                    ],
+                })
+            except Exception as e:
+                results.append({"chapter": ch_num, "error": str(e)})
+
+    if not results:
         raise HTTPException(400, "没有找到可用章节")
-    try:
-        result = await run_sync(reader.simulate_readers, chapters, sample_count=req.sample_count)
-        return {"ok": True, "result": dc_to_dict(result)}
+
+    # 返回综合结果
+    valid = [r for r in results if "overall_score" in r]
+    avg_score = sum(r["overall_score"] for r in valid) / len(valid) if valid else 0
+    return {
+        "ok": True,
+        "chapters": results,
+        "average_score": round(avg_score, 1),
+        "chapters_tested": len(valid),
+    }
     except Exception as e:
         raise HTTPException(500, f"MiroFish 测试失败：{e}")
 
