@@ -114,12 +114,15 @@ def _build_pipeline(s, llm=None):
         config=config,
     )
 
-    # WebSocket 进度回调
+    # WebSocket 进度回调（延迟导入避免循环依赖）
     try:
-        from core.server import ws_manager
-        pipeline.set_progress_callback(
-            lambda data: asyncio.ensure_future(ws_manager.broadcast(s.book_id, data))
-        )
+        import importlib
+        _server = importlib.import_module("core.server")
+        _ws = getattr(_server, "ws_manager", None)
+        if _ws:
+            pipeline.set_progress_callback(
+                lambda data: asyncio.ensure_future(_ws.broadcast(s.book_id, data))
+            )
     except Exception:
         pass
 
@@ -300,6 +303,7 @@ async def three_layer_audit(book_id: str, req: ThreeLayerAuditReq):
         report = await run_sync(
             auditor.audit_chapter,
             content, req.chapter, blueprint, truth_ctx, settlement,
+            cross_thread_context="",
         )
         return {"ok": True, "report": dc_to_dict(report), "chapter": req.chapter}
     except Exception as e:
@@ -334,7 +338,8 @@ async def action_revise(book_id: str, chapter: int = Query(...), mode: str = Que
     settlement = PostWriteSettlement([], [], [], [], [])
 
     try:
-        report = await run_sync(auditor.audit_chapter, content, chapter, blueprint, truth_ctx, settlement)
+        report = await run_sync(auditor.audit_chapter, content, chapter, blueprint, truth_ctx, settlement,
+                                 cross_thread_context="")
         result = await run_sync(reviser.revise, content, report.issues, mode)
         s.save_draft(chapter, result.content)
         s.save_final(chapter, result.content)
@@ -492,7 +497,8 @@ async def action_audit(book_id: str, chapter: int = Query(...)):
     settlement = PostWriteSettlement([], [], [], [], [])
 
     def _audit_sync():
-        return auditor.audit_chapter(content, chapter, blueprint, truth_ctx, settlement)
+        return auditor.audit_chapter(content, chapter, blueprint, truth_ctx, settlement,
+                                      cross_thread_context="")
 
     try:
         loop = asyncio.get_event_loop()
@@ -550,3 +556,30 @@ async def resume_from_checkpoint(book_id: str):
     remaining = total - completed
     req = ContinueWritingReq(count=remaining)
     return await continue_writing(book_id, req)
+
+
+# ── V6: 旧路径兼容（前端可能仍调用 /api/action/*）─────────────────────────────
+
+@router.post("/api/action/write")
+async def legacy_action_write(book_id: str = Query(...), count: int = Query(1)):
+    """旧路径兼容：/api/action/write → /{book_id}/write"""
+    logging.warning("[deprecated] /api/action/write 已弃用，请改用 /{book_id}/write")
+    return await action_write(book_id, count)
+
+
+@router.post("/api/action/audit")
+async def legacy_action_audit(book_id: str = Query(...), chapter: int = Query(...)):
+    """旧路径兼容：/api/action/audit → /{book_id}/audit"""
+    logging.warning("[deprecated] /api/action/audit 已弃用，请改用 /{book_id}/audit")
+    return await action_audit(book_id, chapter)
+
+
+@router.post("/api/action/revise")
+async def legacy_action_revise(
+    book_id: str = Query(...),
+    chapter: int = Query(...),
+    mode: str = Query("spot-fix"),
+):
+    """旧路径兼容：/api/action/revise → /{book_id}/revise"""
+    logging.warning("[deprecated] /api/action/revise 已弃用，请改用 /{book_id}/revise")
+    return await action_revise(book_id, chapter, mode)
