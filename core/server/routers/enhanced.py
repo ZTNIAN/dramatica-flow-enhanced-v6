@@ -155,8 +155,6 @@ async def api_mirofish_test(book_id: str, req: MiroFishReq):
         "average_score": round(avg_score, 1),
         "chapters_tested": len(valid),
     }
-    except Exception as e:
-        raise HTTPException(500, f"MiroFish 测试失败：{e}")
 
 
 # ── V5 新增：Agent 能力画像 ──────────────────────────────────────────────────
